@@ -5,11 +5,11 @@ from inventory import render_inventory_page
 from pos import render_pos_page
 from accounting import render_accounting_page
 
-st.set_page_config(page_title="Gifts ERP", layout="wide")
+st.set_page_config(page_title="MyOdoo", layout="wide")
 if "user" not in st.session_state:
     st.session_state["user"] = None
 
-st.title("Gifts ERP")
+st.title("MyOdoo")
 
 # 1. Enforce Authentication
 if st.session_state["user"] is None:
