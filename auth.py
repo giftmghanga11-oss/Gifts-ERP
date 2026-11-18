@@ -8,14 +8,32 @@ def hash_password(password: str) -> str:
 def verify_password(password: str, hashed: str) -> bool:
     return bcrypt.checkpw(password.encode('utf-8'), hashed.encode('utf-8'))
 
+def require_login(allowed_roles: list = None):
+    if "user" not in st.session_state or st.session_state["user"] is None:
+        render_login_screen()
+        st.stop()
+    
+    user = st.session_state["user"]
+    if allowed_roles and user["role"] not in allowed_roles:
+        st.error("Access Denied: You do not have permission to view this page.")
+        st.stop()
+
+def create_user(username: str, password: str, full_name: str, role: str):
+    hashed_pw = hash_password(password)
+    execute_write(
+        """
+        INSERT INTO users (username, password_hash, full_name, role)
+        VALUES (:uname, :phash, :fname, :role)
+        """,
+        {"uname": username, "phash": hashed_pw, "fname": full_name, "role": role}
+    )
+
 def render_login_screen():
-    # Custom Sage-inspired styling injected via HTML/CSS
     st.markdown("""
         <style>
         .stApp {
             background-color: #0b0b0b;
         }
-        /* Center container wrapper */
         .login-card {
             background-color: #ffffff;
             padding: 40px;
@@ -33,13 +51,11 @@ def render_login_screen():
             color: #111111;
             margin-bottom: 25px;
         }
-        /* Style Streamlit form inputs inside the card */
         div[data-testid="stForm"] {
             background-color: #ffffff;
             border: none;
             padding: 0px;
         }
-        /* Sage Green Submit Button */
         div[data-testid="stFormSubmitButton"] button {
             background-color: #008f39 !important;
             color: white !important;
@@ -57,7 +73,6 @@ def render_login_screen():
 
     existing_users = run_query("SELECT COUNT(*) AS cnt FROM users;")
     
-    # Center the login box using columns
     _, col_center, _ = st.columns([1, 1.2, 1])
 
     with col_center:
@@ -79,14 +94,7 @@ def render_login_screen():
                     elif password != confirm_password:
                         st.error("Passwords do not match.")
                     else:
-                        hashed_pw = hash_password(password)
-                        execute_write(
-                            """
-                            INSERT INTO users (username, password_hash, full_name, role)
-                            VALUES (:uname, :phash, :fname, 'admin')
-                            """,
-                            {"uname": username, "phash": hashed_pw, "fname": full_name}
-                        )
+                        create_user(username, password, full_name, "admin")
                         st.success("Admin account created successfully! Please refresh.")
                         st.rerun()
             st.markdown('</div>', unsafe_allow_html=True)
