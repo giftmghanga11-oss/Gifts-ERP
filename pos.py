@@ -1,362 +1,176 @@
 import streamlit as st
+import pandas as pd
 from datetime import datetime
-from sqlalchemy import text
 from fpdf import FPDF
-from db import get_engine, run_query
+from db import run_query, execute_write
 
-
-PAYMENT_ACCOUNT_MAP = {
-    "Cash": "1010",
-    "M-Pesa": "1020",
-    "Card": "1030",
-}
-
-
-def generate_receipt_pdf(receipt_data: dict) -> bytes:
-    pdf = FPDF(format=(80, 180))  # 80mm thermal receipt width
-    pdf.set_auto_page_break(auto=True, margin=6)
+def generate_pdf_receipt(receipt_data, customer_info=None):
+    pdf = FPDF()
     pdf.add_page()
-    pdf.set_margins(5, 5, 5)
+    pdf.set_font("Arial", size=10)
+    
+    # Store Header / Title
+    pdf.set_font("Arial", "B", 14)
+    pdf.cell(200, 8, txt="MyOdoo POS - Official Receipt", ln=True, align="C")
+    pdf.set_font("Arial", size=9)
+    pdf.cell(200, 5, txt=f"Date: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}", ln=True, align="C")
+    pdf.ln(5)
+    
+    # Customer Details Section (If it's an account customer)
+    if customer_info:
+        pdf.set_font("Arial", "B", 10)
+        pdf.cell(200, 5, txt="Customer Details:", ln=True, align="L")
+        pdf.set_font("Arial", size=9)
+        pdf.cell(200, 5, txt=f"Account Name: {customer_info['customer_name']}", ln=True, align="L")
+        pdf.cell(200, 5, txt=f"Account Code: {customer_info['account_code']}", ln=True, align="L")
+        pdf.cell(200, 5, txt=f"Phone No: {customer_info.get('phone_no', 'N/A')}", ln=True, align="L")
+        pdf.cell(200, 5, txt=f"KRA PIN: {customer_info.get('kra_pin', 'N/A')}", ln=True, align="L")
+        pdf.ln(5)
+    else:
+        pdf.set_font("Arial", "I", 9)
+        pdf.cell(200, 5, txt="Customer: Walk-in Customer (Cash Sale)", ln=True, align="L")
+        pdf.ln(5)
+        
+    # Table Header
+    pdf.set_font("Arial", "B", 9)
+    pdf.cell(90, 6, "Item Description", 1)
+    pdf.cell(30, 6, "Qty", 1, align="C")
+    pdf.cell(35, 6, "Price", 1, align="R")
+    pdf.cell(35, 6, "Total", 1, ln=True, align="R")
+    
+    # Items
+    pdf.set_font("Arial", size=9)
+    subtotal = 0
+    for item in receipt_data["cart"]:
+        item_total = item["price"] * item["qty"]
+        subtotal += item_total
+        pdf.cell(90, 5, str(item["name"]), 1)
+        pdf.cell(30, 5, str(item["qty"]), 1, align="C")
+        pdf.cell(35, 5, f"{item['price']:,.2f}", 1, align="R")
+        pdf.cell(35, 5, f"{item_total:,.2f}", 1, ln=True, align="R")
+        
+    # Total
+    pdf.set_font("Arial", "B", 10)
+    pdf.cell(155, 7, "Grand Total:", 1, align="R")
+    pdf.cell(35, 7, f"{subtotal:,.2f}", 1, ln=True, align="R")
+    
+    pdf.ln(10)
+    pdf.set_font("Arial", "I", 8)
+    pdf.cell(200, 5, txt="Thank you for your business!", ln=True, align="C")
+    
+    return pdf.output(dest='S').encode('latin1')
 
-    pdf.set_font("Helvetica", "B", 11)
-    pdf.cell(0, 6, "POS & ACCOUNTING RECEIPT", ln=True, align="C")
-    pdf.set_font("Helvetica", "", 8)
-    pdf.cell(0, 4, f"Receipt #: {receipt_data['receipt_number']}", ln=True, align="C")
-    pdf.cell(0, 4, f"Date: {receipt_data['sale_date']}", ln=True, align="C")
-    pdf.cell(0, 4, f"Cashier: {receipt_data['cashier_name']}", ln=True, align="C")
-    pdf.cell(0, 4, f"Payment: {receipt_data['payment_method']}", ln=True, align="C")
-    pdf.ln(2)
-    pdf.cell(0, 2, "-" * 42, ln=True, align="C")
-
-    # Line items
-    pdf.set_font("Helvetica", "B", 8)
-    pdf.cell(34, 5, "Item")
-    pdf.cell(10, 5, "Qty", align="R")
-    pdf.cell(26, 5, "Total", align="R", ln=True)
-    pdf.set_font("Helvetica", "", 8)
-
-    for item in receipt_data["items"]:
-        name = item["name"][:18]
-        pdf.cell(34, 5, name)
-        pdf.cell(10, 5, str(item["qty"]), align="R")
-        pdf.cell(26, 5, f"{item['line_total']:,.2f}", align="R", ln=True)
-
-    pdf.cell(0, 2, "-" * 42, ln=True, align="C")
-    pdf.cell(44, 5, "Subtotal (Excl. VAT):", align="R")
-    pdf.cell(26, 5, f"KES {receipt_data['subtotal']:,.2f}", align="R", ln=True)
-
-    pdf.cell(44, 5, "VAT / Tax:", align="R")
-    pdf.cell(26, 5, f"KES {receipt_data['tax_total']:,.2f}", align="R", ln=True)
-
-    pdf.set_font("Helvetica", "B", 9)
-    pdf.cell(44, 6, "GRAND TOTAL:", align="R")
-    pdf.cell(26, 6, f"KES {receipt_data['grand_total']:,.2f}", align="R", ln=True)
-
-    pdf.ln(3)
-    pdf.set_font("Helvetica", "I", 8)
-    pdf.cell(0, 5, "Thank you for your business!", ln=True, align="C")
-
-    return bytes(pdf.output())
-
-
-def process_sale_transaction(cart: list, payment_method: str, user: dict) -> dict:
-    """
-    Atomically processes sale, updates stock, and posts double-entry accounting lines.
-    Prices are treated as VAT-inclusive at checkout for standard retail POS workflow.
-    """
-    engine = get_engine()
-    receipt_number = f"RCP-{datetime.now().strftime('%Y%m%d-%H%M%S')}"
-    sale_timestamp = datetime.now()
-
-    subtotal_excl_tax = 0.0
-    tax_total = 0.0
-    grand_total = 0.0
-    total_cogs = 0.0
-    enriched_items = []
-
-    with engine.begin() as conn:
-        # 1. Lock and verify current stock & costs for each cart item
-        for item in cart:
-            row = conn.execute(
-                text(
-                    """
-                    SELECT product_id, name, cost_price, selling_price, tax_rate, stock_qty
-                    FROM products
-                    WHERE product_id = :pid
-                    FOR UPDATE
-                    """
-                ),
-                {"pid": item["product_id"]},
-            ).fetchone()
-
-            if not row:
-                raise ValueError(f"Product ID {item['product_id']} no longer exists.")
-            if row.stock_qty < item["qty"]:
-                raise ValueError(f"Insufficient stock for '{row.name}'. Available: {row.stock_qty}")
-
-            qty = int(item["qty"])
-            unit_sell = float(row.selling_price)
-            unit_cost = float(row.cost_price)
-            tax_rate = float(row.tax_rate)
-
-            line_gross = round(unit_sell * qty, 2)
-            # Extract VAT from tax-inclusive retail price
-            line_net = round(line_gross / (1 + tax_rate / 100.0), 2)
-            line_tax = round(line_gross - line_net, 2)
-            line_cogs = round(unit_cost * qty, 2)
-
-            subtotal_excl_tax = round(subtotal_excl_tax + line_net, 2)
-            tax_total = round(tax_total + line_tax, 2)
-            grand_total = round(grand_total + line_gross, 2)
-            total_cogs = round(total_cogs + line_cogs, 2)
-
-            enriched_items.append(
-                {
-                    "product_id": row.product_id,
-                    "name": row.name,
-                    "qty": qty,
-                    "unit_price": unit_sell,
-                    "unit_cost": unit_cost,
-                    "line_total": line_gross,
-                }
-            )
-
-        # 2. Insert Sales Header
-        sale_res = conn.execute(
-            text(
-                """
-                INSERT INTO sales (receipt_number, cashier_id, sale_date, subtotal, tax_total, grand_total, payment_method)
-                VALUES (:rcp, :cid, :sdate, :sub, :tax, :grand, :pm)
-                RETURNING sale_id
-                """
-            ),
-            {
-                "rcp": receipt_number,
-                "cid": user["user_id"],
-                "sdate": sale_timestamp,
-                "sub": subtotal_excl_tax,
-                "tax": tax_total,
-                "grand": grand_total,
-                "pm": payment_method,
-            },
-        )
-        sale_id = sale_res.scalar()
-
-        # 3. Insert Sale Line Items & Deduct Stock
-        for ei in enriched_items:
-            conn.execute(
-                text(
-                    """
-                    INSERT INTO sale_items (sale_id, product_id, qty, unit_price, unit_cost, line_total)
-                    VALUES (:sid, :pid, :qty, :uprice, :ucost, :ltotal)
-                    """
-                ),
-                {
-                    "sid": sale_id,
-                    "pid": ei["product_id"],
-                    "qty": ei["qty"],
-                    "uprice": ei["unit_price"],
-                    "ucost": ei["unit_cost"],
-                    "ltotal": ei["line_total"],
-                },
-            )
-            conn.execute(
-                text("UPDATE products SET stock_qty = stock_qty - :qty WHERE product_id = :pid"),
-                {"qty": ei["qty"], "pid": ei["product_id"]},
-            )
-
-        # 4. Create Double-Entry Journal Header
-        je_res = conn.execute(
-            text(
-                """
-                INSERT INTO journal_entries (entry_date, reference_type, reference_id, description, created_by)
-                VALUES (:edate, 'POS_SALE', :sid, :desc, :uid)
-                RETURNING entry_id
-                """
-            ),
-            {
-                "edate": sale_timestamp,
-                "sid": sale_id,
-                "desc": f"POS Sale {receipt_number} ({payment_method})",
-                "uid": user["user_id"],
-            },
-        )
-        entry_id = je_res.scalar()
-
-        # 5. Post Balanced Journal Lines
-        asset_code = PAYMENT_ACCOUNT_MAP[payment_method]
-
-        # Debit Cash / M-Pesa / Bank (Grand Total)
-        conn.execute(
-            text(
-                """
-                INSERT INTO journal_lines (entry_id, account_id, debit, credit)
-                VALUES (:eid, (SELECT account_id FROM chart_of_accounts WHERE account_code = :code), :amt, 0)
-                """
-            ),
-            {"eid": entry_id, "code": asset_code, "amt": grand_total},
-        )
-
-        # Credit Sales Revenue 4000 (Net Subtotal)
-        conn.execute(
-            text(
-                """
-                INSERT INTO journal_lines (entry_id, account_id, debit, credit)
-                VALUES (:eid, (SELECT account_id FROM chart_of_accounts WHERE account_code = '4000'), 0, :amt)
-                """
-            ),
-            {"eid": entry_id, "amt": subtotal_excl_tax},
-        )
-
-        # Credit VAT Payable 2100 (Tax Total)
-        if tax_total > 0:
-            conn.execute(
-                text(
-                    """
-                    INSERT INTO journal_lines (entry_id, account_id, debit, credit)
-                    VALUES (:eid, (SELECT account_id FROM chart_of_accounts WHERE account_code = '2100'), 0, :amt)
-                    """
-                ),
-                {"eid": entry_id, "amt": tax_total},
-            )
-
-        # Debit COGS 5000 & Credit Inventory Asset 1200 (Total Cost)
-        if total_cogs > 0:
-            conn.execute(
-                text(
-                    """
-                    INSERT INTO journal_lines (entry_id, account_id, debit, credit)
-                    VALUES
-                    (:eid, (SELECT account_id FROM chart_of_accounts WHERE account_code = '5000'), :amt, 0),
-                    (:eid, (SELECT account_id FROM chart_of_accounts WHERE account_code = '1200'), 0, :amt)
-                    """
-                ),
-                {"eid": entry_id, "amt": total_cogs},
-            )
-
-    return {
-        "receipt_number": receipt_number,
-        "sale_date": sale_timestamp.strftime("%Y-%m-%d %H:%M:%S"),
-        "cashier_name": user["full_name"],
-        "payment_method": payment_method,
-        "items": enriched_items,
-        "subtotal": subtotal_excl_tax,
-        "tax_total": tax_total,
-        "grand_total": grand_total,
-    }
-
-
-def render_pos_page(user):
-    st.header("Point of Sale (POS) Checkout")
-
+def render_pos_page():
+    st.header("Point of Sale (POS) Terminal")
+    
     if "cart" not in st.session_state:
         st.session_state["cart"] = []
-    if "last_receipt" not in st.session_state:
-        st.session_state["last_receipt"] = None
 
-    products_df = run_query(
-        """
-        SELECT product_id, sku_barcode, name, selling_price, tax_rate, stock_qty
-        FROM products
-        WHERE stock_qty > 0
-        ORDER BY name;
-        """
-    )
+    # Fetch inventory & customers
+    inventory_df = run_query("SELECT product_id, name, selling_price, stock_quantity FROM inventory WHERE stock_quantity > 0;")
+    customers_df = run_query("SELECT customer_id, account_code, customer_name, phone_no, kra_pin FROM customers ORDER BY customer_name;")
 
-    col_left, col_right = st.columns([1.2, 1.3])
+    col1, col2 = st.columns([2, 1])
 
-    with col_left:
-        st.subheader("Select Item")
-        if products_df.empty:
-            st.warning("No in-stock products available. Add stock in Inventory first.")
+    with col1:
+        st.subheader("Select Products")
+        if inventory_df.empty:
+            st.warning("No products available in inventory.")
         else:
-            product_map = {
-                f"{r['name']} [{r['sku_barcode']}] — KES {r['selling_price']:,.2f} ({r['stock_qty']} left)": r
-                for _, r in products_df.iterrows()
-            }
-            selected_key = st.selectbox("Search by Product Name or SKU", list(product_map.keys()))
-            selected_prod = product_map[selected_key]
-
-            qty_to_add = st.number_input(
-                "Quantity",
-                min_value=1,
-                max_value=int(selected_prod["stock_qty"]),
-                value=1,
-                step=1,
-            )
-
-            if st.button("Add to Cart", use_container_width=True):
-                pid = int(selected_prod["product_id"])
-                existing = next((c for c in st.session_state["cart"] if c["product_id"] == pid), None)
-                if existing:
-                    new_qty = existing["qty"] + qty_to_add
-                    if new_qty > int(selected_prod["stock_qty"]):
-                        st.error("Cannot exceed available stock.")
-                    else:
-                        existing["qty"] = new_qty
-                        st.rerun()
-                else:
-                    st.session_state["cart"].append(
-                        {
-                            "product_id": pid,
-                            "sku": selected_prod["sku_barcode"],
-                            "name": selected_prod["name"],
-                            "unit_price": float(selected_prod["selling_price"]),
-                            "tax_rate": float(selected_prod["tax_rate"]),
-                            "qty": int(qty_to_add),
-                        }
-                    )
+            for _, row in inventory_df.iterrows():
+                cols = st.columns([3, 1, 1])
+                cols[0].write(f"**{row['name']}** (Stock: {row['stock_quantity']}) - KES {row['selling_price']:,.2f}")
+                qty = cols[1].number_input("Qty", min_value=1, max_value=int(row['stock_quantity']), value=1, key=f"qty_{row['product_id']}_pos")
+                if cols[2].button("Add", key=f"add_{row['product_id']}_pos"):
+                    # Add to cart
+                    cart_item = {
+                        "product_id": int(row['product_id']),
+                        "name": row['name'],
+                        "price": float(row['selling_price']),
+                        "qty": int(qty)
+                    }
+                    st.session_state["cart"].append(cart_item)
                     st.rerun()
 
-    with col_right:
-        st.subheader("Current Cart")
+    with col2:
+        st.subheader("Current Sale / Cart")
         if not st.session_state["cart"]:
             st.info("Cart is empty.")
         else:
-            cart_rows = []
-            total_due = 0.0
+            cart_total = 0
             for idx, item in enumerate(st.session_state["cart"]):
-                line_tot = round(item["unit_price"] * item["qty"], 2)
-                total_due += line_tot
-                cart_rows.append(
-                    {
-                        "Product": item["name"],
-                        "Qty": item["qty"],
-                        "Unit Price": f"{item['unit_price']:,.2f}",
-                        "Line Total": f"{line_tot:,.2f}",
-                    }
-                )
+                item_sum = item["price"] * item["qty"]
+                cart_total += item_sum
+                st.write(f"{item['name']} x {item['qty']} = KES {item_sum:,.2f}")
+            
+            st.divider( )
+            st.markdown(f"### Total: KES {cart_total:,.2f}")
+            
+            # Customer Selection for Checkout
+            cust_options = ["Walk-in Customer (Cash Sale)"]
+            cust_map = {}
+            if not customers_df.empty:
+                for _, crow in customers_df.iterrows():
+                    label = f"{crow['customer_name']} ({crow['account_code']})"
+                    cust_options.append(label)
+                    cust_map[label] = crow.to_dict()
+            
+            selected_cust_label = st.selectbox("Customer Account", cust_options)
+            is_walkin = "Walk-in" in selected_cust_label
+            customer_data = None if is_walkin else cust_map[selected_cust_label]
 
-            st.dataframe(cart_rows, use_container_width=True, hide_index=True)
-            st.metric("Total Payable (VAT Inclusive)", f"KES {total_due:,.2f}")
+            if st.button("Complete Sale & Print Receipt", type="primary"):
+                # 1. Deduct Inventory & Record Journal Entry
+                try:
+                    # Get Account IDs for double-entry posting
+                    sales_acc = run_query("SELECT account_id FROM chart_of_accounts WHERE account_name LIKE '%Sales%' OR account_name LIKE '%Revenue%' LIMIT 1;")
+                    cash_acc = run_query("SELECT account_id FROM chart_of_accounts WHERE account_name LIKE '%Cash%' OR account_name LIKE '%M-Pesa%' OR account_name LIKE '%Bank%' LIMIT 1;")
+                    ar_acc = run_query("SELECT account_id FROM chart_of_accounts WHERE account_name LIKE '%Receivable%' LIMIT 1;")
 
-            payment_method = st.selectbox("Payment Method", ["Cash", "M-Pesa", "Card"])
+                    if sales_acc.empty or (cash_acc.empty and is_walkin) or (ar_acc.empty and not is_walkin):
+                        st.error("Accounting error: Required accounts (Sales, Cash, or Accounts Receivable) not found in Chart of Accounts.")
+                        return
 
-            c_pay, c_clear = st.columns(2)
-            with c_pay:
-                if st.button("Complete Sale", type="primary", use_container_width=True):
-                    try:
-                        receipt = process_sale_transaction(st.session_state["cart"], payment_method, user)
-                        st.session_state["last_receipt"] = receipt
-                        st.session_state["cart"] = []
-                        st.rerun()
-                    except Exception as e:
-                        st.error(f"Checkout failed: {e}")
+                    sales_acc_id = int(sales_acc.iloc[0]["account_id"])
+                    
+                    # Create Journal Entry header
+                    desc = f"POS Sale to Walk-in" if is_walkin else f"POS Credit Sale to {customer_data['customer_name']} ({customer_data['account_code']})"
+                    res = run_query("INSERT INTO journal_entries (description) VALUES (:desc) RETURNING journal_entry_id;", {"desc": desc})
+                    je_id = int(res.iloc[0]["journal_entry_id"])
 
-            with c_clear:
-                if st.button("Clear Cart", use_container_width=True):
+                    # Post Double Entries
+                    if is_walkin:
+                        target_asset_id = int(cash_acc.iloc[0]["account_id"])
+                        # Debit Cash/Bank
+                        execute_write("INSERT INTO journal_lines (journal_entry_id, account_id, debit, credit) VALUES (:je, :acc, :amt, 0)", {"je": je_id, "acc": target_asset_id, "amt": cart_total})
+                    else:
+                        target_asset_id = int(ar_acc.iloc[0]["account_id"])
+                        # Debit Accounts Receivable
+                        execute_write("INSERT INTO journal_lines (journal_entry_id, account_id, debit, credit) VALUES (:je, :acc, :amt, 0)", {"je": je_id, "acc": target_asset_id, "amt": cart_total})
+
+                    # Credit Sales Revenue
+                    execute_write("INSERT INTO journal_lines (journal_entry_id, account_id, debit, credit) VALUES (:je, :acc, 0, :amt)", {"je": je_id, "acc": sales_acc_id, "amt": cart_total})
+
+                    # Deduct stock
+                    for item in st.session_state["cart"]:
+                        execute_write("UPDATE inventory SET stock_quantity = stock_quantity - :qty WHERE product_id = :pid;", {"qty": item["qty"], "pid": item["product_id"]})
+
+                    # Generate PDF Receipt
+                    pdf_bytes = generate_pdf_receipt({"cart": st.session_state["cart"]}, customer_info=customer_data)
+                    
+                    st.success("Sale completed successfully and recorded to ledger!")
+                    st.download_button(
+                        label="📥 Download Receipt PDF",
+                        data=pdf_bytes,
+                        file_name=f"Receipt_{datetime.now().strftime('%Y%m%d_%H%M%S')}.pdf",
+                        mime="application/pdf"
+                    )
+
+                    # Clear Cart
                     st.session_state["cart"] = []
-                    st.rerun()
+                except Exception as e:
+                    st.error(f"Transaction failed: {e}")
 
-    # Display receipt & PDF download after successful checkout
-    if st.session_state["last_receipt"]:
-        st.divider()
-        rcp = st.session_state["last_receipt"]
-        st.success(f"Sale Completed! Receipt #{rcp['receipt_number']} — Total: KES {rcp['grand_total']:,.2f}")
-        pdf_bytes = generate_receipt_pdf(rcp)
-        st.download_button(
-            label="Download PDF Receipt",
-            data=pdf_bytes,
-            file_name=f"{rcp['receipt_number']}.pdf",
-            mime="application/pdf",
-        )
+            if st.button("Clear Cart"):
+                st.session_state["cart"] = []
+                st.rerun()
