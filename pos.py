@@ -78,7 +78,7 @@ def render_pos_page(user=None):
         FROM inventory 
         WHERE COALESCE(stock_quantity, in_stock, stock, 0) > 0;
     """)
-    )
+
     customers_df = run_query(
         "SELECT customer_id, account_code, customer_name, phone_no, kra_pin FROM customers ORDER BY customer_name;"
     )
