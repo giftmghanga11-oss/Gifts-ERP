@@ -60,7 +60,10 @@ def generate_pdf_receipt(receipt_data, customer_info=None):
     
     return pdf.output(dest='S').encode('latin1')
 
-def render_pos_page():
+def render_pos_page(user=None):
+    st.header("Point of Sale (POS) Terminal")
+    if user:
+        st.caption(f"Logged in as: {user['full_name']} ({user['role'].capitalize()})
     st.header("Point of Sale (POS) Terminal")
     
     if "cart" not in st.session_state:
