@@ -146,7 +146,7 @@ def render_login_screen():
                         st.rerun()
         else:
             with st.form("login_form"):
-                st.markdown('<div class="login-header">Sage ERP</div>', unsafe_allow_html=True)
+                st.markdown('<div class="login-header">MyOdoo</div>', unsafe_allow_html=True)
 
                 username = st.text_input("Login")
                 password = st.text_input("Password", type="password")
