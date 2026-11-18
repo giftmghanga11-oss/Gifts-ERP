@@ -172,7 +172,3 @@ def render_login_screen():
                             st.rerun()
                         else:
                             st.error("Invalid username or password.")
-
-div[data-testid="stFormSubmitButton"] {
-    width: 100% !important;
-}
