@@ -51,6 +51,52 @@ def render_login_screen():
             color: #111111;
             margin-bottom: 25px;
         }
+        /* Make input field labels inside the white card solid black */
+        .login-card label, .login-card [data-testid="stWidgetLabel"] p {
+            color: #111111 !important;
+            font-weight: 600;
+        }
+        div[data-testid="stForm"] {
+            background-color: #ffffff;
+            border: none;
+            padding: 0px;
+        }
+        div[data-testid="stFormSubmitButton"] button {
+            background-color: #008f39 !important;
+            color: white !important;
+            border-radius: 25px !important;
+            width: 100% !important;
+            font-weight: bold;
+            border: none;
+            padding: 10px;
+        }
+        div[data-testid="stFormSubmitButton"] button:hover {
+            background-color: #007530 !important;
+        }
+        </style>
+    """, unsafe_allow_html=True)
+    st.markdown("""
+        <style>
+        .stApp {
+            background-color: #0b0b0b;
+        }
+        .login-card {
+            background-color: #ffffff;
+            padding: 40px;
+            border-radius: 16px;
+            box-shadow: 0 4px 25px rgba(0,0,0,0.5);
+            max-width: 450px;
+            margin: 40px auto;
+            color: #111111;
+        }
+        .login-header {
+            text-align: center;
+            font-family: 'Helvetica Neue', Helvetica, Arial, sans-serif;
+            font-weight: bold;
+            font-size: 24px;
+            color: #111111;
+            margin-bottom: 25px;
+        }
         div[data-testid="stForm"] {
             background-color: #ffffff;
             border: none;
