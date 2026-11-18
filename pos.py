@@ -72,12 +72,11 @@ def render_pos_page(user=None):
 
     # Fetch inventory & customers
 # Fetch inventory dynamically matching your existing database columns
-    inventory_df = run_query("""
-        SELECT product_id, name, selling_price, 
-               COALESCE(stock_quantity, in_stock, stock, 0) as stock_quantity 
-        FROM inventory 
-        WHERE COALESCE(stock_quantity, in_stock, stock, 0) > 0;
-    """)
+inventory_df = run_query("""
+    SELECT product_id, name, sku, selling_price, stock_quantity
+    FROM inventory
+    WHERE stock_quantity > 0;
+""")
 
     customers_df = run_query(
         "SELECT customer_id, account_code, customer_name, phone_no, kra_pin FROM customers ORDER BY customer_name;"
