@@ -128,7 +128,7 @@ def render_accounting_page(user):
             exps["display_amount"] = -exps["net_balance"]
 
             total_revenue = revs["net_balance"].sum() if not revs.empty else 0.0
-            total_expense = exps["net_balance"].sum() if not exps.empty else 0.0
+            total_expense = exps["display_amount"].sum() if not exps.empty else 0.0
             net_profit = total_revenue - total_expense
 
             st.markdown("#### **Revenue**")
@@ -174,6 +174,16 @@ def render_accounting_page(user):
             ORDER BY COA.account_code;
             """
         )
+        pl = run_query(
+            """
+            SELECT COALESCE(SUM(jl.credit - jl.debit), 0) AS p
+            FROM journal_lines jl
+            JOIN chart_of_accounts c ON c.account_id = jl.account_id
+            WHERE c.account_type IN ('Revenue', 'Expense')
+            """
+        )
+        current_earnings = float(pl.iloc[0]["p"])
+
         if bs_df.empty:
             st.info("No balance sheet data available yet.")
         else:
@@ -181,29 +191,9 @@ def render_accounting_page(user):
             liabilities = bs_df[bs_df["account_type"] == "Liability"]
             equity = bs_df[bs_df["account_type"] == "Equity"]
 
-                        assets = bs_df[bs_df["account_type"] == "Asset"]
-            liabilities = bs_df[bs_df["account_type"] == "Liability"]
-            equity = bs_df[bs_df["account_type"] == "Equity"]
-
             tot_assets = assets["balance"].sum() if not assets.empty else 0.0
             tot_liab = liabilities["balance"].sum() if not liabilities.empty else 0.0
-            tot_eq = equity["balance"].sum() if not equity.empty else 0.0
-
-            # Current-period profit (revenue - expenses) belongs in equity until it is closed to retained earnings
-            pl = run_query(
-                """
-                SELECT COALESCE(SUM(jl.credit - jl.debit), 0) AS p
-                FROM journal_lines jl
-                JOIN chart_of_accounts c ON c.account_id = jl.account_id
-                WHERE c.account_type IN ('Revenue', 'Expense')
-                """
-            )
-            current_earnings = float(pl.iloc[0]["p"])
-            tot_eq += current_earnings
-
-            st.markdown("#### **Assets**")
-            tot_liab = liabilities["balance"].sum() if not liabilities.empty else 0.0
-            tot_eq = equity["balance"].sum() if not equity.empty else 0.0
+            tot_eq = (equity["balance"].sum() if not equity.empty else 0.0) + current_earnings
 
             st.markdown("#### **Assets**")
             st.dataframe(
@@ -232,7 +222,13 @@ def render_accounting_page(user):
                     hide_index=True,
                     use_container_width=True,
                 )
+            st.metric("Current Period Earnings", f"KES {current_earnings:,.2f}")
             st.metric("Total Liabilities & Equity", f"KES {(tot_liab + tot_eq):,.2f}")
+
+            if round(tot_assets, 2) == round(tot_liab + tot_eq, 2):
+                st.success("Balance Sheet is balanced (Assets = Liabilities + Equity).")
+            else:
+                st.error("Balance Sheet is OUT OF BALANCE! Check the Trial Balance tab.")
 
     with tab5:
         st.subheader("Record Operating Expense")
