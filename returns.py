@@ -3,6 +3,7 @@ import streamlit as st
 from sqlalchemy import text
 from db import get_engine, run_query
 from common import CURRENCY, PAYMENT_METHODS, account_id, post_entry, show_df
+from documents import load_credit_note, credit_note_pdf
 
 
 def process_return(entry_id: int, qty_by_item: dict, refund_method, reason: str, user_id: int):
@@ -36,13 +37,14 @@ def process_return(entry_id: int, qty_by_item: dict, refund_method, reason: str,
 
         net_total = vat_total = cost_total = 0.0
         returned_lines = []
+        ret_rows = []
         for item_id, r in qty_by_item.items():
             if r <= 0:
                 continue
             row = conn.execute(
                 text(
                     """
-                    SELECT product_id, product_name, qty, returned_qty, unit_cost, net_amount, vat_amount
+                    SELECT product_id, product_name, qty, returned_qty, unit_cost, net_amount, vat_amount, unit_price
                     FROM pos_sale_items WHERE item_id = :i AND entry_id = :e FOR UPDATE
                     """
                 ),
@@ -50,12 +52,15 @@ def process_return(entry_id: int, qty_by_item: dict, refund_method, reason: str,
             ).fetchone()
             if row is None:
                 raise ValueError("Item does not belong to this sale.")
-            pid, pname, qty, already, unit_cost, net, vat = row
+            pid, pname, qty, already, unit_cost, net, vat, unit_price = row
             if r > qty - already:
                 raise ValueError(f"Cannot return {r} x {pname}: only {qty - already} left to return.")
 
-            net_total += round(float(net) * r / qty, 2)
-            vat_total += round(float(vat) * r / qty, 2)
+            net_r = round(float(net) * r / qty, 2)
+            vat_r = round(float(vat) * r / qty, 2)
+            net_total += net_r
+            vat_total += vat_r
+            ret_rows.append((pname, r, float(unit_price), net_r, vat_r))
             cost_total += float(unit_cost) * r
             returned_lines.append(f"{r}x {pname}")
 
@@ -98,6 +103,18 @@ def process_return(entry_id: int, qty_by_item: dict, refund_method, reason: str,
             customer_id=int(customer_id) if (on_credit and customer_id) else None,
             ref_id=entry_id,
         )
+        for pname, r_qty, uprice, net_r, vat_r in ret_rows:
+            conn.execute(
+                text(
+                    """
+                    INSERT INTO pos_return_items (return_entry_id, sale_entry_id, product_name, qty, unit_price,
+                                                  net_amount, vat_amount, total_amount, reason, settled_via)
+                    VALUES (:re, :se, :n, :q, :up, :net, :vat, :tot, :rs, :sv)
+                    """
+                ),
+                {"re": cn_id, "se": entry_id, "n": pname, "q": r_qty, "up": uprice, "net": net_r,
+                 "vat": vat_r, "tot": round(net_r + vat_r, 2), "rs": reason.strip(), "sv": how},
+            )
     return {"credit_note": cn_id, "amount": gross, "how": how, "on_credit": on_credit}
 
 
@@ -105,9 +122,21 @@ def render_returns_page(user):
     st.header("Sales Returns")
     st.caption("Returned goods go back into stock and the sale is reversed in the ledger.")
 
-    flash = st.session_state.pop("ret_flash", None)
-    if flash:
-        st.success(flash)
+    last = st.session_state.get("ret_last")
+    if last:
+        st.success(last["msg"])
+        a, b = st.columns([1, 4])
+        if last["pdf"]:
+            a.download_button(
+                "Download credit note (PDF)",
+                data=last["pdf"],
+                file_name=f"CreditNote_CN-{last['cn']:06d}.pdf",
+                mime="application/pdf",
+                type="primary",
+            )
+        if b.button("Done"):
+            st.session_state.pop("ret_last")
+            st.rerun()
 
     tab1, tab2 = st.tabs(["Process Return", "Return History"])
 
@@ -172,9 +201,15 @@ def render_returns_page(user):
                         else:
                             try:
                                 res = process_return(entry_id, qty_by_item, method, reason, user["user_id"])
-                                st.session_state["ret_flash"] = (
-                                    f"Return recorded (ref {res['credit_note']}): {CURRENCY} {res['amount']:,.2f} {res['how']}."
-                                )
+                                try:
+                                    pdf = credit_note_pdf(load_credit_note(res["credit_note"]))
+                                except Exception:
+                                    pdf = None
+                                st.session_state["ret_last"] = {
+                                    "cn": res["credit_note"],
+                                    "pdf": pdf,
+                                    "msg": f"Return recorded (CN-{res['credit_note']:06d}): {CURRENCY} {res['amount']:,.2f} {res['how']}.",
+                                }
                                 st.rerun()
                             except Exception as e:
                                 st.error(f"Return not recorded: {e}")
@@ -193,3 +228,14 @@ def render_returns_page(user):
             st.info("No returns recorded yet.")
         else:
             show_df(hist)
+            labels = {f"CN-{int(r['Ref']):06d} | {r['Date']} | {r['Details'][:60]}": int(r["Ref"]) for _, r in hist.iterrows()}
+            pick = labels[st.selectbox("Credit note", list(labels.keys()))]
+            try:
+                st.download_button(
+                    "Download credit note (PDF)",
+                    data=credit_note_pdf(load_credit_note(pick)),
+                    file_name=f"CreditNote_CN-{pick:06d}.pdf",
+                    mime="application/pdf",
+                )
+            except Exception as e:
+                st.caption(f"No credit note available for this return: {e}")

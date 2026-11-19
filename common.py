@@ -34,6 +34,7 @@ ON_ACCOUNT = "On Account (Credit)"
 ROLE_PAGES = {
     "admin": [
         "POS Checkout",
+        "Receipts",
         "Customers",
         "Sales Returns",
         "Inventory & Products",
@@ -41,7 +42,7 @@ ROLE_PAGES = {
         "Reports",
         "User Management",
     ],
-    "cashier": ["POS Checkout", "Customers"],
+    "cashier": ["POS Checkout", "Receipts", "Customers"],
 }
 
 

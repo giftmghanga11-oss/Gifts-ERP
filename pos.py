@@ -116,7 +116,7 @@ def process_sale(cart, customer, payment, user_id):
     }
 
 
-def generate_pdf_receipt(sale, customer=None, cashier=""):
+def generate_pdf_receipt(sale, customer=None, cashier="", issued=None, reprint=False, note=""):
     pdf = FPDF(format="A5")
     pdf.add_page()
     pdf.set_margins(10, 10, 10)
@@ -124,7 +124,9 @@ def generate_pdf_receipt(sale, customer=None, cashier=""):
 
     pdf_line(pdf, f"{COMPANY_NAME} - Official Receipt", h=8, align="C", style="B", size=14)
     pdf_line(pdf, f"Receipt No: POS-{sale['entry_id']:06d}", align="C")
-    pdf_line(pdf, datetime.now().strftime("%Y-%m-%d %H:%M"), align="C")
+    pdf_line(pdf, (issued or datetime.now()).strftime("%Y-%m-%d %H:%M"), align="C")
+    if reprint:
+        pdf_line(pdf, f"*** DUPLICATE COPY - reprinted {datetime.now():%Y-%m-%d %H:%M} ***", align="C", style="B", size=9)
     if cashier:
         pdf_line(pdf, f"Served by: {cashier}", align="C")
     pdf.ln(3)
@@ -157,6 +159,8 @@ def generate_pdf_receipt(sale, customer=None, cashier=""):
     pdf_row(pdf, [(label_w, f"TOTAL ({CURRENCY})", "R"), (w[3], f"{sale['total']:,.2f}", "R")], h=7, style="B", size=10)
     pdf.ln(2)
     pdf_line(pdf, f"Payment: {sale['payment']}")
+    if note:
+        pdf_line(pdf, note, style="I", size=8)
     pdf.ln(4)
     pdf_line(pdf, "Thank you for your business!", align="C", style="I", size=8)
     return bytes(pdf.output())
