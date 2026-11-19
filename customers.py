@@ -64,6 +64,16 @@ def create_customer(code, name, phone, pin):
     )
 
 
+def update_customer(customer_id, name, phone, pin):
+    execute_write(
+        """
+        UPDATE customers SET customer_name = :name, phone_no = :phone, kra_pin = :pin
+        WHERE customer_id = :id
+        """,
+        {"name": name, "phone": phone, "pin": pin, "id": customer_id},
+    )
+
+
 def record_receipt(customer, amount, method_label, reference, user_id):
     """Customer pays: Dr Cash/M-Pesa/Bank, Cr Accounts Receivable."""
     with get_engine().begin() as conn:
@@ -90,7 +100,7 @@ def render_customers_page(user):
     if flash:
         st.success(flash)
 
-    tab1, tab2, tab3 = st.tabs(["Customer Directory", "New Customer", "Receive Payment"])
+    tab1, tab2, tab3, tab4 = st.tabs(["Customer Directory", "New Customer", "Receive Payment", "Edit Customer"])
 
     with tab1:
         df = customer_balances_df()
@@ -180,3 +190,49 @@ def render_customers_page(user):
                             st.rerun()
                         except Exception as e:
                             st.error(f"Could not post payment: {e}")
+
+    with tab4:
+        df = customer_balances_df()
+        if df.empty:
+            st.info("Add a customer first.")
+        else:
+            options = {f"{r['Customer']} ({r['Account Code']})": r for _, r in df.iterrows()}
+            label = st.selectbox("Customer to edit", list(options.keys()), key="edit_pick")
+            cust = options[label]
+            cid = int(cust["customer_id"])
+
+            with st.form(f"edit_customer_form_{cid}"):
+                st.text_input("Account code (cannot be changed)", value=cust["Account Code"], disabled=True)
+                name = st.text_input("Customer / company name", value=cust["Customer"] or "")
+                phone = st.text_input("Phone number", value=cust["Phone"] or "")
+                pin = st.text_input("KRA PIN (optional)", value=cust["KRA PIN"] or "")
+
+                if st.form_submit_button("Update customer"):
+                    name, pin = name.strip(), pin.strip().upper()
+                    phone_norm = normalize_phone(phone)
+                    if not name:
+                        st.error("Customer name is required.")
+                    elif phone_norm is None:
+                        st.error("Phone number is not valid. Use e.g. 0712345678 or +254712345678.")
+                    elif pin and not KRA_PIN_RE.match(pin):
+                        st.error("KRA PIN must look like A123456789Z.")
+                    else:
+                        dup = run_query(
+                            """
+                            SELECT customer_name, account_code FROM customers
+                            WHERE customer_id <> :id
+                              AND ((:pin <> '' AND kra_pin = :pin) OR (:phone <> '' AND phone_no = :phone))
+                            LIMIT 1;
+                            """,
+                            {"id": cid, "pin": pin, "phone": phone_norm},
+                        )
+                        if not dup.empty:
+                            d = dup.iloc[0]
+                            st.error(f"Phone or KRA PIN already belongs to {d['customer_name']} ({d['account_code']}).")
+                        else:
+                            try:
+                                update_customer(cid, name, phone_norm, pin)
+                                st.session_state["cust_flash"] = f"Customer {cust['Account Code']} updated."
+                                st.rerun()
+                            except Exception as e:
+                                st.error(f"Could not update customer: {e}")

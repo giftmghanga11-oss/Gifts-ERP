@@ -8,6 +8,7 @@ from pos import render_pos_page
 from accounting import render_accounting_page
 from customers import render_customers_page
 from reports import render_reports_page
+from returns import render_returns_page
 
 st.set_page_config(page_title="MyOdoo", layout="wide")
 
@@ -73,6 +74,7 @@ def render_users_page(user):
 PAGES = {
     "POS Checkout": (["admin", "cashier"], render_pos_page),
     "Customers": (["admin", "cashier"], render_customers_page),
+    "Sales Returns": (["admin"], render_returns_page),
     "Inventory & Products": (["admin"], render_inventory_page),
     "Accounting & Journal": (["admin"], render_accounting_page),
     "Reports": (["admin"], render_reports_page),

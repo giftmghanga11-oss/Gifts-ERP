@@ -54,10 +54,11 @@ def process_sale(cart, customer, payment, user_id):
             ).fetchone()
             if row is None:
                 raise ValueError(f"Not enough stock for {it['name']}.")
-            cogs_total += float(row[0] or 0) * it["qty"]
+            unit_cost = float(row[0] or 0)
+            cogs_total += unit_cost * it["qty"]
             net, vat, total = price_line(it["price"], it["qty"], it["tax_rate"])
             net_total, vat_total, gross_total = net_total + net, vat_total + vat, gross_total + total
-            lines_out.append({**it, "total": total})
+            lines_out.append({**it, "total": total, "net": net, "vat": vat, "unit_cost": unit_cost})
 
         net_total, vat_total, gross_total = round(net_total, 2), round(vat_total, 2), round(gross_total, 2)
         cogs_total = round(cogs_total, 2)
@@ -89,6 +90,21 @@ def process_sale(cart, customer, payment, user_id):
             lines,
             customer_id=int(customer["customer_id"]) if customer is not None else None,
         )
+
+        # Keep the item detail so the sale can be returned later
+        for ln in lines_out:
+            conn.execute(
+                text(
+                    """
+                    INSERT INTO pos_sale_items (entry_id, product_id, product_name, qty, unit_price,
+                                            tax_rate, unit_cost, net_amount, vat_amount, total_amount)
+                    VALUES (:e, :p, :n, :q, :up, :tr, :uc, :net, :vat, :tot)
+                    """
+                ),
+                {"e": entry_id, "p": ln["product_id"], "n": ln["name"], "q": ln["qty"],
+                 "up": ln["price"], "tr": ln["tax_rate"], "uc": ln["unit_cost"],
+                 "net": ln["net"], "vat": ln["vat"], "tot": ln["total"]},
+            )
 
     return {
         "entry_id": entry_id,
