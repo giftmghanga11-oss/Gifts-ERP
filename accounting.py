@@ -124,7 +124,8 @@ def render_accounting_page(user):
             st.info("No revenue or expense data recorded yet.")
         else:
             revs = pnl_df[pnl_df["account_type"] == "Revenue"]
-            exps = pnl_df[pnl_df["account_type"] == "Expense"]
+            exps = pnl_df[pnl_df["account_type"] == "Expense"].copy()
+            exps["display_amount"] = -exps["net_balance"]
 
             total_revenue = revs["net_balance"].sum() if not revs.empty else 0.0
             total_expense = exps["net_balance"].sum() if not exps.empty else 0.0
@@ -143,7 +144,6 @@ def render_accounting_page(user):
 
             st.markdown("#### **Expenses & COGS**")
             if not exps.empty:
-                exps["display_amount"] = exps["net_balance"].abs()
                 st.dataframe(
                     exps[["account_code", "account_name", "display_amount"]].rename(
                         columns={"account_code": "Code", "account_name": "Account", "display_amount": "Amount (KES)"}
@@ -181,7 +181,27 @@ def render_accounting_page(user):
             liabilities = bs_df[bs_df["account_type"] == "Liability"]
             equity = bs_df[bs_df["account_type"] == "Equity"]
 
+                        assets = bs_df[bs_df["account_type"] == "Asset"]
+            liabilities = bs_df[bs_df["account_type"] == "Liability"]
+            equity = bs_df[bs_df["account_type"] == "Equity"]
+
             tot_assets = assets["balance"].sum() if not assets.empty else 0.0
+            tot_liab = liabilities["balance"].sum() if not liabilities.empty else 0.0
+            tot_eq = equity["balance"].sum() if not equity.empty else 0.0
+
+            # Current-period profit (revenue - expenses) belongs in equity until it is closed to retained earnings
+            pl = run_query(
+                """
+                SELECT COALESCE(SUM(jl.credit - jl.debit), 0) AS p
+                FROM journal_lines jl
+                JOIN chart_of_accounts c ON c.account_id = jl.account_id
+                WHERE c.account_type IN ('Revenue', 'Expense')
+                """
+            )
+            current_earnings = float(pl.iloc[0]["p"])
+            tot_eq += current_earnings
+
+            st.markdown("#### **Assets**")
             tot_liab = liabilities["balance"].sum() if not liabilities.empty else 0.0
             tot_eq = equity["balance"].sum() if not equity.empty else 0.0
 
