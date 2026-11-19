@@ -1,94 +1,97 @@
 import streamlit as st
+
 from db import run_query, execute_write
-from auth import render_login_screen, require_login, create_user
+from auth import render_login_screen, require_login, create_user, MIN_PASSWORD_LEN
+from common import ROLE_PAGES, show_df
 from inventory import render_inventory_page
 from pos import render_pos_page
 from accounting import render_accounting_page
+from customers import render_customers_page
+from reports import render_reports_page
 
 st.set_page_config(page_title="MyOdoo", layout="wide")
+
 if "user" not in st.session_state:
     st.session_state["user"] = None
 
-st.title("MyOdoo")
-
-# 1. Enforce Authentication
+# 1. Authentication (the login screen draws its own branding)
 if st.session_state["user"] is None:
     render_login_screen()
     st.stop()
 
 user = st.session_state["user"]
 
-# 2. Sidebar Navigation Based on Role
-with st.sidebar:
-    st.markdown(f"**Logged in as:** {user['full_name']}")
-    st.caption(f"Role: `{user['role'].upper()}`")
-    st.divider()
 
-    if user["role"] == "admin":
-        menu_options = [
-            "POS Checkout",
-            "Inventory & Products",
-            "Accounting & Journal",
-            "User Management",
-        ]
-    else:
-        menu_options = ["POS Checkout"]
-
-    choice = st.radio("Navigation", menu_options)
-    st.divider()
-    if st.button("Log Out", use_container_width=True):
-        st.session_state["user"] = None
-        st.rerun()
-
-# 3. Route Views with Explicit Role Checks
-if choice == "POS Checkout":
-    require_login(["admin", "cashier"])
-    render_pos_page(user)
-    require_login(["admin", "cashier"])
-    st.header("Point of Sale (POS) Checkout")
-    st.info("Ready to build the barcode/product cart and automatic double-entry posting here next.")
-
-elif choice == "Inventory & Products":
-    require_login(["admin"])
-    render_inventory_page(user)
-    require_login(["admin"])
-    st.header("Inventory & Products Management")
-    st.info("Ready to build product catalog, stock levels, and restock journal entries here.")
-
-elif choice == "Accounting & Journal":
-    require_login(["admin"])
-    render_accounting_page(user)
-    require_login(["admin"])
-    st.header("Accounting & Chart of Accounts")
-    df = run_query("SELECT account_code, account_name, account_type FROM chart_of_accounts ORDER BY account_code;")
-    st.dataframe(df, use_container_width=True, hide_index=True)
-
-elif choice == "User Management":
-    require_login(["admin"])
+def render_users_page(user):
     st.header("Staff & Role Management")
-
     col1, col2 = st.columns([1, 2])
+
     with col1:
-        st.subheader("Add New User")
-        with st.form("add_user_form"):
-            new_name = st.text_input("Full Name")
-            new_user = st.text_input("Username")
-            new_pass = st.text_input("Temporary Password", type="password")
+        st.subheader("Add user")
+        with st.form("add_user_form", clear_on_submit=True):
+            new_name = st.text_input("Full name")
+            new_user = st.text_input("Login")
+            new_pass = st.text_input("Temporary password", type="password")
             new_role = st.selectbox("Role", ["cashier", "admin"])
-            if st.form_submit_button("Create User"):
-                if new_name and new_user and new_pass:
+            if st.form_submit_button("Create user"):
+                if not (new_name and new_user and new_pass):
+                    st.warning("Please fill in all fields.")
+                elif len(new_pass) < MIN_PASSWORD_LEN:
+                    st.warning(f"Password must be at least {MIN_PASSWORD_LEN} characters.")
+                else:
                     try:
-                        create_user(new_user, new_name, new_pass, new_role)
+                        # keyword arguments: the old positional call mixed up password and full name
+                        create_user(username=new_user, password=new_pass, full_name=new_name, role=new_role)
                         st.success(f"User '{new_user}' created as {new_role}.")
-                        st.rerun()
                     except Exception as e:
                         st.error(f"Could not create user: {e}")
-                else:
-                    st.warning("Please fill in all fields.")
 
     with col2:
-        st.subheader("Existing Staff Accounts")
+        st.subheader("Staff accounts")
         users_df = run_query(
             "SELECT user_id, username, full_name, role, is_active, created_at FROM users ORDER BY user_id;"
         )
-        st.dataframe(users_df, use_container_width=True, hide_index=True)
+        show_df(users_df)
+
+        st.subheader("Enable / disable an account")
+        others = users_df[users_df["user_id"] != user["user_id"]]
+        if others.empty:
+            st.caption("No other accounts yet.")
+        else:
+            labels = {f"{r['username']} ({'active' if r['is_active'] else 'disabled'})": r for _, r in others.iterrows()}
+            pick = labels[st.selectbox("Account", list(labels.keys()))]
+            action = "Disable" if pick["is_active"] else "Enable"
+            if st.button(f"{action} account"):
+                execute_write(
+                    "UPDATE users SET is_active = :a WHERE user_id = :id",
+                    {"a": not bool(pick["is_active"]), "id": int(pick["user_id"])},
+                )
+                st.rerun()
+
+
+# page name -> (allowed roles, renderer)
+PAGES = {
+    "POS Checkout": (["admin", "cashier"], render_pos_page),
+    "Customers": (["admin", "cashier"], render_customers_page),
+    "Inventory & Products": (["admin"], render_inventory_page),
+    "Accounting & Journal": (["admin"], render_accounting_page),
+    "Reports": (["admin"], render_reports_page),
+    "User Management": (["admin"], render_users_page),
+}
+
+# 2. Sidebar navigation based on role
+with st.sidebar:
+    st.markdown(f"**{user['full_name']}**")
+    st.caption(f"Role: {user['role'].upper()}")
+    st.divider()
+    menu = [p for p in ROLE_PAGES.get(user["role"], []) if p in PAGES]
+    choice = st.radio("Navigation", menu)
+    st.divider()
+    if st.button("Log out"):
+        st.session_state["user"] = None
+        st.rerun()
+
+# 3. Route, re-checking the role on the server side
+roles, renderer = PAGES[choice]
+require_login(roles)
+renderer(user)
