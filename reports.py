@@ -438,6 +438,20 @@ def payment_summary(df: pd.DataFrame) -> pd.DataFrame:
     return out
 
 
+def ledger_sales_revenue(d_from: date, d_to: date) -> float:
+    """Net credit on the Sales Revenue account for the period: what the income statement calls revenue."""
+    sales_id = lookup_account_id("sales")
+    df = run_query(
+        """
+        SELECT CAST(COALESCE(SUM(jl.credit - jl.debit), 0) AS FLOAT) AS v
+        FROM journal_lines jl JOIN journal_entries je ON je.entry_id = jl.entry_id
+        WHERE jl.account_id = :a AND CAST(je.entry_date AS date) BETWEEN :f AND :t;
+        """,
+        {"a": sales_id, "f": d_from, "t": d_to},
+    )
+    return float(df.iloc[0]["v"])
+
+
 class SalesPDF(FPDF):
     def header(self):
         pdf_line(self, f"{COMPANY_NAME} - Sales Report", h=8, style="B", size=14)
@@ -708,6 +722,26 @@ def render_reports_page(user):
                 k[1].metric("Returns", f"{CURRENCY} {sales[sales['Type'] == 'Return']['Total'].sum():,.2f}")
                 k[2].metric("Net total (incl. VAT)", f"{CURRENCY} {sales['Total'].sum():,.2f}")
                 k[3].metric("VAT", f"{CURRENCY} {sales['VAT'].sum():,.2f}")
+
+                if set(methods) == set(SALES_METHODS) and with_returns and not sq:
+                    try:
+                        led = ledger_sales_revenue(s_from, s_to)
+                        diff = round(float(sales["Net"].sum()) - led, 2)
+                        if abs(diff) < 0.01:
+                            st.success(
+                                f"Reconciled: net sales (excl. VAT) of {CURRENCY} {sales['Net'].sum():,.2f} "
+                                "equal Sales Revenue in the ledger for this period."
+                            )
+                        else:
+                            st.warning(
+                                f"Net sales are {CURRENCY} {sales['Net'].sum():,.2f} but the ledger's Sales Revenue "
+                                f"for this period is {CURRENCY} {led:,.2f} (difference {CURRENCY} {diff:,.2f}). "
+                                "Look for manual journal entries on the sales account."
+                            )
+                    except Exception:
+                        pass
+                else:
+                    st.caption("Clear the search and payment filters, and include returns, to compare with the ledger.")
 
                 st.caption("By payment method")
                 show_df(summ.style.format({"Sales": "{:,.2f}", "Returns": "{:,.2f}", "Net": "{:,.2f}", "Share %": "{:.1f}"}))
