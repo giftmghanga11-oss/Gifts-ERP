@@ -100,7 +100,7 @@ def process_return(entry_id: int, qty_by_item: dict, refund_method, reason: str,
             desc,
             user_id,
             lines,
-            customer_id=int(customer_id) if (on_credit and customer_id) else None,
+            customer_id=int(customer_id) if customer_id else None,
             ref_id=entry_id,
         )
         for pname, r_qty, uprice, net_r, vat_r in ret_rows:
