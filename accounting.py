@@ -105,7 +105,11 @@ def render_accounting_page(user):
             st.error("Trial Balance is OUT OF BALANCE!")
 
     with tab3:
-        st.subheader("Income Statement (Profit & Loss)")
+        c1, c2 = st.columns(2)
+        from datetime import date
+        pl_from = c1.date_input("From", value=date.today().replace(day=1), key="pl_from")
+        pl_to = c2.date_input("To", value=date.today(), key="pl_to")
+
         pnl_df = run_query(
             """
             SELECT 
@@ -115,10 +119,13 @@ def render_accounting_page(user):
                 SUM(jl.credit - jl.debit) AS net_balance
             FROM chart_of_accounts COA
             JOIN journal_lines jl ON COA.account_id = jl.account_id
+            JOIN journal_entries je ON je.entry_id = jl.entry_id
             WHERE COA.account_type IN ('Revenue', 'Expense')
+              AND CAST(je.entry_date AS date) BETWEEN :d_from AND :d_to
             GROUP BY COA.account_code, COA.account_name, COA.account_type
             ORDER BY COA.account_code;
-            """
+            """,
+            {"d_from": pl_from, "d_to": pl_to},
         )
         if pnl_df.empty:
             st.info("No revenue or expense data recorded yet.")
