@@ -120,11 +120,14 @@ def build_statement(ledger: pd.DataFrame, d_from: date, d_to: date):
                 "Description": r["description"],
                 "Debit": r["debit"] if r["debit"] else None,
                 "Credit": r["credit"] if r["credit"] else None,
-                "Balance": round(float(r["balance"]), 2),
+                # first leg of a pair settled at the till: the balance only moves once, on the second leg
+                "Balance": None if (r["settled"] and r["doc_type"] in ("Invoice", "Credit Note"))
+                else round(float(r["balance"]), 2),
             }
         )
     rows.append(
-        {"Date": str(d_to), "Type": "", "Reference": "", "Description": "Closing balance",
+        {"Date": str(d_to), "Type": "", "Reference": "",
+         "Description": "Closing balance (CREDIT)" if closing < 0 else "Closing balance",
          "Debit": total_dr, "Credit": total_cr, "Balance": closing}
     )
     return pd.DataFrame(rows), opening, total_dr, total_cr, closing
@@ -192,6 +195,9 @@ def statement_pdf(customer, d_from, d_to, stmt: pd.DataFrame, ageing: dict) -> b
     aw = 190 / 4
     pdf_row(pdf, [(aw, b, "C") for b in BUCKETS], h=6, style="B", size=8)
     pdf_row(pdf, [(aw, f"{ageing[b]:,.2f}", "C") for b in BUCKETS], h=6, size=9)
+    if float(stmt.iloc[-1]["Balance"]) < 0:
+        pdf.ln(2)
+        pdf_line(pdf, "A negative balance means the customer is in credit (we owe the customer).", h=5, style="B", size=8)
     pdf.ln(4)
     pdf_line(pdf, "Please quote your account code when making payment. Report any difference within 7 days.", h=5, style="I", size=8)
     return bytes(pdf.output())
