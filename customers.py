@@ -178,9 +178,15 @@ def render_customers_page(user):
                 amount = st.number_input(f"Amount received ({CURRENCY})", min_value=0.0, step=100.0)
                 method = st.selectbox("Received via", list(PAYMENT_METHODS.keys()))
                 ref = st.text_input("Reference (M-Pesa code, cheque no., bank ref)")
+                advance = st.checkbox("Allow amount above the outstanding balance (records customer credit)")
                 if st.form_submit_button("Post payment"):
                     if amount <= 0:
                         st.error("Enter an amount greater than zero.")
+                    elif amount > max(float(cust["Balance"]), 0) and not advance:
+                        st.error(
+                            f"{CURRENCY} {amount:,.2f} is more than the outstanding balance "
+                            f"({CURRENCY} {max(float(cust['Balance']), 0):,.2f}). Tick the box above if this is an advance payment."
+                        )
                     else:
                         try:
                             record_receipt(cust, round(amount, 2), method, ref, user["user_id"])
