@@ -151,7 +151,11 @@ def fifo_ageing(ledger: pd.DataFrame, as_of: date) -> dict:
         age = (as_of - r["txn_date"]).days
         key = BUCKETS[0] if age <= 30 else BUCKETS[1] if age <= 60 else BUCKETS[2] if age <= 90 else BUCKETS[3]
         out[key] += left
-    return {k: round(v, 2) for k, v in out.items()}
+    out = {k: round(v, 2) for k, v in out.items()}
+    # payments / credit notes left over after every invoice is settled = customer credit (shown negative)
+    out["Credit balance"] = -round(credits, 2) if credits > 0.005 else 0.0
+    out["Total balance"] = round(sum(out.values()), 2)  # equals the statement's closing balance
+    return out
 
 
 # ---------------------------------------------------------------- exports
@@ -192,9 +196,10 @@ def statement_pdf(customer, d_from, d_to, stmt: pd.DataFrame, ageing: dict) -> b
 
     pdf.ln(5)
     pdf_line(pdf, "Ageing of outstanding balance (oldest invoices settled first)", h=6, style="B", size=9)
-    aw = 190 / 4
-    pdf_row(pdf, [(aw, b, "C") for b in BUCKETS], h=6, style="B", size=8)
-    pdf_row(pdf, [(aw, f"{ageing[b]:,.2f}", "C") for b in BUCKETS], h=6, size=9)
+    keys = list(ageing.keys())
+    aw = 190 / len(keys)
+    pdf_row(pdf, [(aw, k, "C") for k in keys], h=6, style="B", size=7)
+    pdf_row(pdf, [(aw, f"{ageing[k]:,.2f}", "C") for k in keys], h=6, size=8)
     if float(stmt.iloc[-1]["Balance"]) < 0:
         pdf.ln(2)
         pdf_line(pdf, "A negative balance means the customer is in credit (we owe the customer).", h=5, style="B", size=8)
@@ -218,9 +223,9 @@ def statement_excel(customer, d_from, d_to, stmt: pd.DataFrame, ageing: dict) ->
                 cell.number_format = "#,##0.00"
         start = len(stmt) + 9
         ws.cell(row=start, column=1, value="Ageing (oldest invoices settled first)")
-        for j, b in enumerate(BUCKETS):
-            ws.cell(row=start + 1, column=1 + j, value=b)
-            ws.cell(row=start + 2, column=1 + j, value=ageing[b]).number_format = "#,##0.00"
+        for j, k in enumerate(ageing):
+            ws.cell(row=start + 1, column=1 + j, value=k)
+            ws.cell(row=start + 2, column=1 + j, value=ageing[k]).number_format = "#,##0.00"
     return buf.getvalue()
 
 
@@ -439,17 +444,38 @@ def payment_summary(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def ledger_sales_revenue(d_from: date, d_to: date) -> float:
-    """Net credit on the Sales Revenue account for the period: what the income statement calls revenue."""
-    sales_id = lookup_account_id("sales")
+    """Net credit on all Revenue accounts for the period: what the income statement calls revenue."""
     df = run_query(
         """
         SELECT CAST(COALESCE(SUM(jl.credit - jl.debit), 0) AS FLOAT) AS v
-        FROM journal_lines jl JOIN journal_entries je ON je.entry_id = jl.entry_id
-        WHERE jl.account_id = :a AND CAST(je.entry_date AS date) BETWEEN :f AND :t;
+        FROM journal_lines jl
+        JOIN journal_entries je ON je.entry_id = jl.entry_id
+        JOIN chart_of_accounts c ON c.account_id = jl.account_id
+        WHERE c.account_type = 'Revenue' AND CAST(je.entry_date AS date) BETWEEN :f AND :t;
         """,
-        {"a": sales_id, "f": d_from, "t": d_to},
+        {"f": d_from, "t": d_to},
     )
     return float(df.iloc[0]["v"])
+
+
+def ledger_revenue_exceptions(d_from: date, d_to: date) -> pd.DataFrame:
+    """Revenue entries that the sales report does not list (not a POS sale or return)."""
+    return run_query(
+        """
+        SELECT je.entry_id AS "Entry", CAST(je.entry_date AS date) AS "Date",
+               COALESCE(je.reference_type, '(none)') AS "Ref type", je.description AS "Description",
+               CAST(SUM(jl.credit - jl.debit) AS FLOAT) AS "Revenue"
+        FROM journal_entries je
+        JOIN journal_lines jl ON jl.entry_id = je.entry_id
+        JOIN chart_of_accounts c ON c.account_id = jl.account_id
+        WHERE c.account_type = 'Revenue'
+          AND (je.reference_type IS NULL OR je.reference_type NOT IN ('SALE', 'SALE_RETURN'))
+          AND CAST(je.entry_date AS date) BETWEEN :f AND :t
+        GROUP BY je.entry_id, je.entry_date, je.reference_type, je.description
+        ORDER BY je.entry_id;
+        """,
+        {"f": d_from, "t": d_to},
+    )
 
 
 class SalesPDF(FPDF):
@@ -730,14 +756,22 @@ def render_reports_page(user):
                         if abs(diff) < 0.01:
                             st.success(
                                 f"Reconciled: net sales (excl. VAT) of {CURRENCY} {sales['Net'].sum():,.2f} "
-                                "equal Sales Revenue in the ledger for this period."
+                                "equal total revenue in the ledger for this period."
                             )
                         else:
                             st.warning(
-                                f"Net sales are {CURRENCY} {sales['Net'].sum():,.2f} but the ledger's Sales Revenue "
+                                f"Net sales are {CURRENCY} {sales['Net'].sum():,.2f} but the ledger's revenue "
                                 f"for this period is {CURRENCY} {led:,.2f} (difference {CURRENCY} {diff:,.2f}). "
-                                "Look for manual journal entries on the sales account."
+                                "The entries below are revenue in the ledger that are not POS sales or returns."
                             )
+                            exc = ledger_revenue_exceptions(s_from, s_to)
+                            if not exc.empty:
+                                show_df(exc.style.format({"Revenue": "{:,.2f}"}))
+                            else:
+                                st.caption(
+                                    "No such entries found, so the gap is inside POS sales: check for a sale "
+                                    "posted with an unusual payment account."
+                                )
                     except Exception:
                         pass
                 else:
