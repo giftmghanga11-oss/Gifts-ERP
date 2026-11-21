@@ -1,3 +1,4 @@
+import re
 from datetime import date, datetime
 from io import BytesIO
 
@@ -17,32 +18,82 @@ from common import (
 )
 from customers import customer_balances_df
 
+MONEY_LABELS = {
+    ACCOUNTS["cash"][0]: "Cash",
+    ACCOUNTS["mpesa"][0]: "M-Pesa",
+    ACCOUNTS["bank"][0]: "Bank / Card",
+}
+MONEY_CODES_SQL = ",".join(f"'{c}'" for c in MONEY_LABELS)  # constants from common.py, not user input
+STMT_COLS = ["txn_date", "entry_id", "seq", "doc_type", "reference", "description", "debit", "credit", "settled"]
 BUCKETS = ["Current (0-30)", "31-60 days", "61-90 days", "Over 90 days"]
 
 
 # ------------------------------------------------------------------- data
 def load_customer_ledger(customer_id: int, d_to: date) -> pd.DataFrame:
-    """Every Accounts Receivable movement for one customer up to d_to."""
+    """Every dealing with one customer up to d_to, as invoices, payments, credit notes and refunds.
+
+    A purchase paid at the till shows as an Invoice plus a Payment (net effect on the balance: nil),
+    so the statement lists everything the customer bought and paid.
+    """
     ar_id = lookup_account_id("ar")
-    df = run_query(
-        """
-        SELECT CAST(je.entry_date AS date) AS txn_date,
-               je.entry_id,
-               je.reference_type,
+    raw = run_query(
+        f"""
+        SELECT CAST(je.entry_date AS date) AS txn_date, je.entry_id, je.reference_type, je.reference_id,
                je.description,
-               CAST(jl.debit AS FLOAT)  AS debit,
-               CAST(jl.credit AS FLOAT) AS credit
-        FROM journal_lines jl
-        JOIN journal_entries je ON je.entry_id = jl.entry_id
+               CAST(COALESCE(SUM(CASE WHEN jl.account_id = :ar THEN jl.debit END), 0) AS FLOAT)  AS ar_debit,
+               CAST(COALESCE(SUM(CASE WHEN jl.account_id = :ar THEN jl.credit END), 0) AS FLOAT) AS ar_credit,
+               CAST(COALESCE(SUM(CASE WHEN jl.account_id <> :ar AND c.account_code IN ({MONEY_CODES_SQL})
+                                      THEN jl.debit END), 0) AS FLOAT)  AS pay_debit,
+               CAST(COALESCE(SUM(CASE WHEN jl.account_id <> :ar AND c.account_code IN ({MONEY_CODES_SQL})
+                                      THEN jl.credit END), 0) AS FLOAT) AS pay_credit,
+               MAX(CASE WHEN jl.account_id <> :ar AND c.account_code IN ({MONEY_CODES_SQL})
+                        THEN c.account_code END) AS pay_code
+        FROM journal_entries je
+        JOIN journal_lines jl ON jl.entry_id = je.entry_id
+        JOIN chart_of_accounts c ON c.account_id = jl.account_id
         WHERE je.customer_id = :cid
-          AND jl.account_id = :ar
+          AND je.reference_type IN ('SALE', 'CUST_RECEIPT', 'SALE_RETURN')
           AND CAST(je.entry_date AS date) <= :d_to
-        ORDER BY je.entry_date, je.entry_id, jl.line_id;
+        GROUP BY je.entry_id, je.entry_date, je.reference_type, je.reference_id, je.description
+        ORDER BY je.entry_date, je.entry_id;
         """,
-        {"cid": customer_id, "ar": ar_id, "d_to": d_to},
+        {"ar": ar_id, "cid": customer_id, "d_to": d_to},
     )
+
+    rows = []
+
+    def add(r, seq, doc_type, ref, desc, debit, credit, settled):
+        rows.append(
+            {"txn_date": r["txn_date"], "entry_id": int(r["entry_id"]), "seq": seq, "doc_type": doc_type,
+             "reference": ref, "description": desc, "debit": float(debit), "credit": float(credit),
+             "settled": settled}
+        )
+
+    for _, r in raw.iterrows():
+        eid, t = int(r["entry_id"]), r["reference_type"]
+        method = MONEY_LABELS.get(r["pay_code"], "")
+        if t == "SALE":
+            if r["ar_debit"] > 0:
+                add(r, 0, "Invoice", f"POS-{eid:06d}", "Invoice - sold on account", r["ar_debit"], 0, False)
+            elif r["pay_debit"] > 0:
+                add(r, 0, "Invoice", f"POS-{eid:06d}", "Invoice - paid at sale", r["pay_debit"], 0, True)
+                add(r, 1, "Payment", f"POS-{eid:06d}", f"Payment at sale via {method}".strip(), 0, r["pay_debit"], True)
+        elif t == "CUST_RECEIPT":
+            desc = str(r["description"])
+            via = desc.split(" via ", 1)[1] if " via " in desc else ""
+            add(r, 0, "Payment", f"RCT-{eid:06d}", f"Payment received via {via}" if via else "Payment received",
+                0, r["ar_credit"], False)
+        elif t == "SALE_RETURN":
+            base = re.split(r" - (?:credited|refunded)", str(r["description"]))[0]
+            if r["ar_credit"] > 0:
+                add(r, 0, "Credit Note", f"CN-{eid:06d}", base, 0, r["ar_credit"], False)
+            elif r["pay_credit"] > 0:
+                add(r, 0, "Credit Note", f"CN-{eid:06d}", base, 0, r["pay_credit"], True)
+                add(r, 1, "Refund", f"CN-{eid:06d}", f"Refund via {method}".strip(), r["pay_credit"], 0, True)
+
+    df = pd.DataFrame(rows, columns=STMT_COLS)
     df["txn_date"] = pd.to_datetime(df["txn_date"]).dt.date
-    return df
+    return df.sort_values(["txn_date", "entry_id", "seq"]).reset_index(drop=True)
 
 
 def build_statement(ledger: pd.DataFrame, d_from: date, d_to: date):
@@ -57,13 +108,15 @@ def build_statement(ledger: pd.DataFrame, d_from: date, d_to: date):
     closing = round(opening + total_dr - total_cr, 2)
 
     rows = [
-        {"Date": str(d_from), "Reference": "", "Description": "Opening balance", "Debit": None, "Credit": None, "Balance": opening}
+        {"Date": str(d_from), "Type": "", "Reference": "", "Description": "Opening balance",
+         "Debit": None, "Credit": None, "Balance": opening}
     ]
     for _, r in period.iterrows():
         rows.append(
             {
                 "Date": str(r["txn_date"]),
-                "Reference": f"{r['reference_type']}-{int(r['entry_id'])}",
+                "Type": r["doc_type"],
+                "Reference": r["reference"],
                 "Description": r["description"],
                 "Debit": r["debit"] if r["debit"] else None,
                 "Credit": r["credit"] if r["credit"] else None,
@@ -71,13 +124,18 @@ def build_statement(ledger: pd.DataFrame, d_from: date, d_to: date):
             }
         )
     rows.append(
-        {"Date": str(d_to), "Reference": "", "Description": "Closing balance", "Debit": total_dr, "Credit": total_cr, "Balance": closing}
+        {"Date": str(d_to), "Type": "", "Reference": "", "Description": "Closing balance",
+         "Debit": total_dr, "Credit": total_cr, "Balance": closing}
     )
     return pd.DataFrame(rows), opening, total_dr, total_cr, closing
 
 
 def fifo_ageing(ledger: pd.DataFrame, as_of: date) -> dict:
-    """Allocate all credits to the oldest debits first; age what is left."""
+    """Allocate payments to the oldest unpaid invoices first; age what is left.
+
+    Sales already paid at the till are ignored: they never became a debt.
+    """
+    ledger = ledger[~ledger["settled"]]
     out = {b: 0.0 for b in BUCKETS}
     credits = float(ledger["credit"].sum())
     for _, r in ledger[ledger["debit"] > 0].sort_values(["txn_date", "entry_id"]).iterrows():
@@ -111,20 +169,21 @@ def statement_pdf(customer, d_from, d_to, stmt: pd.DataFrame, ageing: dict) -> b
     pdf_line(pdf, f"Period: {d_from:%d %b %Y} to {d_to:%d %b %Y}   |   Printed: {date.today():%d %b %Y}   |   Currency: {CURRENCY}", h=5)
     pdf.ln(3)
 
-    w = [24, 28, 62, 25, 25, 26]
+    w = [22, 22, 26, 54, 22, 22, 22]
     pdf_row(
         pdf,
-        [(w[0], "Date", "L"), (w[1], "Reference", "L"), (w[2], "Description", "L"),
-         (w[3], "Debit", "R"), (w[4], "Credit", "R"), (w[5], "Balance", "R")],
-        style="B",
+        [(w[0], "Date", "L"), (w[1], "Type", "L"), (w[2], "Reference", "L"), (w[3], "Description", "L"),
+         (w[4], "Debit", "R"), (w[5], "Credit", "R"), (w[6], "Balance", "R")],
+        style="B", size=8,
     )
     last = len(stmt) - 1
     for i, r in stmt.iterrows():
         bold = "B" if i in (0, last) else ""
         pdf_row(
             pdf,
-            [(w[0], r["Date"], "L"), (w[1], r["Reference"], "L"), (w[2], str(r["Description"])[:40], "L"),
-             (w[3], _num(r["Debit"]), "R"), (w[4], _num(r["Credit"]), "R"), (w[5], _num(r["Balance"]), "R")],
+            [(w[0], r["Date"], "L"), (w[1], r["Type"], "L"), (w[2], r["Reference"], "L"),
+             (w[3], str(r["Description"])[:34], "L"), (w[4], _num(r["Debit"]), "R"),
+             (w[5], _num(r["Credit"]), "R"), (w[6], _num(r["Balance"]), "R")],
             h=5, style=bold, size=8,
         )
 
@@ -146,9 +205,9 @@ def statement_excel(customer, d_from, d_to, stmt: pd.DataFrame, ageing: dict) ->
         ws["A1"] = f"{COMPANY_NAME} - Customer Statement"
         ws["A2"] = f"{customer['Customer']} ({customer['Account Code']})"
         ws["A3"] = f"Period: {d_from} to {d_to}   Currency: {CURRENCY}"
-        for col, width in zip("ABCDEF", [12, 18, 52, 15, 15, 16]):
+        for col, width in zip("ABCDEFG", [12, 13, 15, 44, 15, 15, 16]):
             ws.column_dimensions[col].width = width
-        for row in ws.iter_rows(min_row=7, min_col=4, max_col=6):
+        for row in ws.iter_rows(min_row=7, min_col=5, max_col=7):
             for cell in row:
                 cell.number_format = "#,##0.00"
         start = len(stmt) + 9
@@ -507,8 +566,8 @@ def render_reports_page(user):
 
                 m = st.columns(4)
                 m[0].metric("Opening balance", f"{CURRENCY} {opening:,.2f}")
-                m[1].metric("Invoiced (debits)", f"{CURRENCY} {tdr:,.2f}")
-                m[2].metric("Received (credits)", f"{CURRENCY} {tcr:,.2f}")
+                m[1].metric("Invoiced", f"{CURRENCY} {tdr:,.2f}")
+                m[2].metric("Paid / credited", f"{CURRENCY} {tcr:,.2f}")
                 m[3].metric("Closing balance", f"{CURRENCY} {closing:,.2f}")
 
                 if len(stmt) == 2:
